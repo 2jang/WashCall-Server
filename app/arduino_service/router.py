@@ -140,8 +140,7 @@ def update_congestion_for_range(cursor, start_timestamp: int, end_timestamp: int
             busy_count = busy_count + 1,
             updated_at = CURRENT_TIMESTAMP
         """
-        #DB 업데이트 일시적으로 막음
-        # cursor.execute(congestion_query, (day_str, hour))
+        cursor.execute(congestion_query, (day_str, hour))
         
         current_dt += timedelta(hours=1)
 
