@@ -45,6 +45,7 @@ class UpdateData(BaseModel):
 class DeviceUpdateRequest(BaseModel):
     machine_id: int
     timestamp: int
+    secret_key: str
     
     model_config = {
         "json_schema_extra": {
@@ -71,7 +72,7 @@ class RawDataRequest(BaseModel):
     deltaX: float
     deltaY: float
     deltaZ: float
-    secret_key: Optional[str] = None  # 호환성을 위해 받되 무시
+    secret_key: str  # 호환성을 위해 받되 무시
     
     model_config = {
         "json_schema_extra": {
