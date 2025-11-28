@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import asyncio
 import os
+import argparse
 
 from app.arduino_service.router import router as arduino_router
 from app.web_service.router import router as android_router
@@ -39,17 +40,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://washcall.space",
-        "https://www.washcall.space",
-        "https://test.washcall.space",
-        "https://washcall-test.2jang.dev",
         "http://localhost:5500",  # Live Server
-        "http://localhost:5501",  # Live Server
-        "http://localhost:8080",  # 로컬 개발
         "http://127.0.0.1:5500",
-        "http://127.0.0.1:5501",
-        "http://127.0.0.1:8080",
-        "https://2025-usw-project.github.io/WashCall-Web/",
-        "https://2025-usw-project.github.io"
 
     ],
     allow_credentials=True,
@@ -213,4 +205,12 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=None)
+    args = parser.parse_args()
+
+    port_env = os.getenv("PORT")
+    port = args.port if args.port is not None else int(port_env) if port_env else 8000
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
