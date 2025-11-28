@@ -1166,30 +1166,6 @@ async def submit_survey(body: SurveyRequest, authorization: str | None = Header(
     return SurveyResponse(message="survey ok")
 
 
-@router.get("/debug")
-async def debug_dump():
-    """Return all database tables and their rows dynamically as JSON.
-    WARNING: Intended for debugging; exposes entire DB contents.
-    """
-    with get_db_connection() as conn:
-        result = {}
-        cur = conn.cursor()
-        try:
-            cur.execute("SHOW TABLES")
-            tables = [row[0] for row in (cur.fetchall() or [])]
-        except Exception as e:
-            return {"error": f"failed to list tables: {e}"}
-
-        for t in tables:
-            c = conn.cursor(dictionary=True)
-            try:
-                c.execute(f"SELECT * FROM `{t}`")
-                rows = c.fetchall() or []
-                result[t] = rows
-            except Exception as e:
-                result[t] = [{"_error": str(e)}]
-    return result
-
 @router.websocket("/status_update")
 async def status_update(websocket: WebSocket, token: str = Query(...)):
     # JWT 인증
