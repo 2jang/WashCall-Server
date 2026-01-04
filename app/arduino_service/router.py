@@ -1,5 +1,14 @@
 from fastapi import APIRouter, HTTPException
-from .schemas import UpdateData, DeviceUpdateRequest, DeviceUpdateResponse, RawDataRequest, RawDataResponse
+from .schemas import (
+    UpdateData,
+    DeviceUpdateRequest,
+    DeviceUpdateResponse,
+    DeviceRegisterRequest,
+    DeviceRegisterResponse,
+    RawDataBatchRequest,
+    RawDataCompactRequest,
+    RawDataResponse,
+)
 from app.database import get_db_connection
 from app.websocket.manager import broadcast_machine_status
 from datetime import datetime, timedelta
@@ -8,6 +17,8 @@ import pytz
 import logging
 import asyncio
 import jwt
+import time
+import secrets
 
 from app.auth.security import ALGORITHM
 from app.services.ai_summary import refresh_ai_tip_if_needed
@@ -68,6 +79,59 @@ def verify_device_jwt(machine_id: int, token: str):
         raise HTTPException(status_code=401, detail="invalid device token")
 
     return payload
+
+
+@router.post("/device_register", response_model=DeviceRegisterResponse)
+@router.post("/device/register", response_model=DeviceRegisterResponse)
+async def device_register(request: DeviceRegisterRequest):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                "SELECT machine_uuid, secret_key FROM machine_table WHERE machine_id = %s",
+                (request.machine_id,),
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                secret_key = secrets.token_urlsafe(32)
+                cursor.execute(
+                    "INSERT INTO machine_table (machine_id, secret_key) VALUES (%s, %s)",
+                    (request.machine_id, secret_key),
+                )
+                conn.commit()
+                token = jwt.encode(
+                    {"sub": str(request.machine_id), "iat": int(time.time())},
+                    secret_key,
+                    algorithm=ALGORITHM,
+                )
+                return DeviceRegisterResponse(message="ok", registered=True, token=token)
+
+            existing = row.get("secret_key")
+            registered = False
+            if not existing:
+                secret_key = secrets.token_urlsafe(32)
+                cursor.execute(
+                    "UPDATE machine_table SET secret_key = %s WHERE machine_id = %s",
+                    (secret_key, request.machine_id),
+                )
+                conn.commit()
+                registered = True
+            else:
+                secret_key = str(existing)
+
+            token = jwt.encode(
+                {"sub": str(request.machine_id), "iat": int(time.time())},
+                secret_key,
+                algorithm=ALGORITHM,
+            )
+            return DeviceRegisterResponse(message="ok", registered=registered, token=token)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Device register failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="device register failed")
 
 
 def timestamp_to_weekday_hour(unix_timestamp):
@@ -474,50 +538,6 @@ async def update(data: UpdateData):
                         logger.warning("탈수 시간 계산 필수 데이터 누락 (스킵)")
                         logger.warning(f"   spinning_update={spinning_update}, last_timestamp={last_timestamp}, course_name={course_name}")
 
-                    # 강화된 유효성 검사
-                    if (first_timestamp is not None and
-                        last_timestamp is not None and
-                        course_name is not None and
-                        isinstance(first_timestamp, (int, float)) and
-                        isinstance(last_timestamp, (int, float)) and
-                        (int(last_timestamp) - int(first_timestamp)) > 0):  # 
-                        try:
-                            # 소요 시간 계산
-                            elapsed_time = int(last_timestamp) - int(first_timestamp)
-
-                            logger.info(f"elapsed_time: {int(last_timestamp)} - {int(first_timestamp)} = {elapsed_time}초")
-
-                            # 음수 체크 (가장 중요!)
-                            if elapsed_time < 0:
-                                logger.error(f"음수 시간 발생: {elapsed_time}초")
-                                logger.error(f"   first_ts: {first_timestamp} ({datetime.fromtimestamp(first_timestamp, tz=pytz.UTC).astimezone(KST) if first_timestamp else 'N/A'})")
-                                logger.error(f"   last_ts: {last_timestamp} ({datetime.fromtimestamp(last_timestamp, tz=pytz.UTC).astimezone(KST) if last_timestamp else 'N/A'})")
-                                logger.warning("음수 시간이므로 코스 시간 기록 스킵")
-                                elapsed_time = None
-
-                            elif elapsed_time == 0:
-                                logger.warning("0초 감지, 기록하지 않음")
-                                elapsed_time = None
-
-                            else:
-                                logger.info("유효한 시간: {}초 ({elapsed_time // 60}분 {elapsed_time % 60}초)")
-
-                            # 유효한 시간만 기록 (함수 내에서도 체크!)
-                            if elapsed_time is not None and elapsed_time > 0:
-                                update_course_avg_time(cursor, course_name, elapsed_time)
-                                logger.info("코스 시간 기록 완료")
-                            else:
-                                logger.warning(f"코스 시간 기록 스킵: elapsed_time={elapsed_time}")
-
-                        except Exception as e:
-                            logger.error(f"코스별 시간 계산 중 오류: {str(e)}", exc_info=True)
-
-                    else:
-                        logger.warning("필수 데이터 누락 또는 타입 오류:")
-                        logger.warning(f"  first_timestamp={first_timestamp}")
-                        logger.warning(f"  last_timestamp={last_timestamp}")
-                        logger.warning(f"  course_name={course_name}")
-
                     # standard_table 삽입
                     try:
                         query2 = """
@@ -655,11 +675,11 @@ async def device_update(request: DeviceUpdateRequest):
 
 
 @router.post("/raw_data", response_model=RawDataResponse)
-async def receive_raw_data(request: RawDataRequest):
+async def receive_raw_data(request: RawDataBatchRequest):
     """
     아두이노에서 전송하는 원시 센서 데이터(magnitude 기반) 수신 및 DB 저장
     """
-    logger.info(f"Raw data received: machine_id={request.machine_id}, magnitude={request.magnitude}, timestamp={request.timestamp}")
+    logger.info(f"Raw data received: machine_id={request.machine_id}, samples={len(request.samples)}")
 
     # 장치 JWT 검증
     verify_device_jwt(request.machine_id, request.secret_key)
@@ -679,26 +699,108 @@ async def receive_raw_data(request: RawDataRequest):
                 logger.warning(f"Unknown machine_id: {request.machine_id}")
                 raise HTTPException(status_code=404, detail="Machine not found")
             
-            # 2. 센서 데이터를 개별 컬럼에 저장
+            if not request.samples:
+                return RawDataResponse(message="receive ok", inserted=0)
+
             insert_query = """
-                INSERT INTO raw_sensor_data 
-                    (machine_id, timestamp, magnitude, deltaX, deltaY, deltaZ, created_at)
-                VALUES 
-                    (%s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO raw_sensor_data
+                    (machine_id, timestamp, deltaX, deltaY, deltaZ, gyroDeltaX, gyroDeltaY, gyroDeltaZ, created_at)
+                VALUES
+                    (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
             """
-            cursor.execute(
-                insert_query,
-                (request.machine_id, request.timestamp, request.magnitude, 
-                request.deltaX, request.deltaY, request.deltaZ)
-            )
+
+            values = [
+                (
+                    request.machine_id,
+                    s.timestamp,
+                    s.deltaX,
+                    s.deltaY,
+                    s.deltaZ,
+                    s.gyroDeltaX,
+                    s.gyroDeltaY,
+                    s.gyroDeltaZ,
+                )
+                for s in request.samples
+            ]
+            cursor.executemany(insert_query, values)
             conn.commit()
-            
-            logger.info(f"Raw data saved: machine_id={request.machine_id}, row_id={cursor.lastrowid}")
-            
-            return RawDataResponse(message="receive ok")
+
+            inserted = len(values)
+            logger.info(f"Raw data saved: machine_id={request.machine_id}, inserted={inserted}")
+
+            return RawDataResponse(message="receive ok", inserted=inserted)
     
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Raw data save failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Raw data save failed: {str(e)}")
+
+
+@router.post("/raw_data_compact", response_model=RawDataResponse)
+async def receive_raw_data_compact(request: RawDataCompactRequest):
+    logger.info(
+        f"Raw data compact received: machine_id={request.machine_id}, samples={len(request.samples)}"
+    )
+
+    verify_device_jwt(request.machine_id, request.secret_key)
+
+    if request.dt <= 0:
+        raise HTTPException(status_code=400, detail="invalid dt")
+    if request.t0 <= 0:
+        raise HTTPException(status_code=400, detail="invalid t0")
+    if not request.samples:
+        return RawDataResponse(message="receive ok", inserted=0)
+
+    for row in request.samples:
+        if not isinstance(row, list) or len(row) != 6:
+            raise HTTPException(status_code=400, detail="invalid samples")
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+
+            cursor.execute(
+                "SELECT machine_id FROM machine_table WHERE machine_id = %s",
+                (request.machine_id,),
+            )
+            machine = cursor.fetchone()
+            if not machine:
+                logger.warning(f"Unknown machine_id: {request.machine_id}")
+                raise HTTPException(status_code=404, detail="Machine not found")
+
+            insert_query = """
+                INSERT INTO raw_sensor_data
+                    (machine_id, timestamp, deltaX, deltaY, deltaZ, gyroDeltaX, gyroDeltaY, gyroDeltaZ, created_at)
+                VALUES
+                    (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """
+
+            values = [
+                (
+                    request.machine_id,
+                    int(request.t0) + i * int(request.dt),
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                )
+                for i, row in enumerate(request.samples)
+            ]
+
+            cursor.executemany(insert_query, values)
+            conn.commit()
+
+            inserted = len(values)
+            logger.info(
+                f"Raw data compact saved: machine_id={request.machine_id}, inserted={inserted}"
+            )
+            return RawDataResponse(message="receive ok", inserted=inserted)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Raw data compact save failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Raw data save failed: {str(e)}")
