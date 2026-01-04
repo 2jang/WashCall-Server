@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import time
 
 class StatusEnum(str, Enum):
@@ -64,32 +64,63 @@ class DeviceUpdateResponse(BaseModel):
     NewSpinThreshold: float = None  # 컬럼명 변경
 
 
-# /raw_data용 스키마 (magnitude 기반)
-class RawDataRequest(BaseModel):
+class DeviceRegisterRequest(BaseModel):
     machine_id: int
+
+
+class DeviceRegisterResponse(BaseModel):
+    message: str = "ok"
+    registered: bool = False
+    token: str = ""
+
+
+# /raw_data용 스키마 (배치 + 델타 기반)
+class RawSample(BaseModel):
     timestamp: int
-    magnitude: float
     deltaX: float
     deltaY: float
     deltaZ: float
-    secret_key: str  # 호환성을 위해 받되 무시
-    
+    gyroDeltaX: float
+    gyroDeltaY: float
+    gyroDeltaZ: float
+
+
+class RawDataBatchRequest(BaseModel):
+    machine_id: int
+    secret_key: str
+    samples: List[RawSample]
+     
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
                     "machine_id": 5,
-                    "timestamp": int(time.time()),  # 현재 타임스탬프
-                    "magnitude": 0.5,
-                    "deltaX": 0.1,
-                    "deltaY": 0.2,
-                    "deltaZ": 0.3,
-                    "secret_key": "string"
+                    "secret_key": "string",
+                    "samples": [
+                        {
+                            "timestamp": int(time.time()),
+                            "deltaX": 0.1,
+                            "deltaY": 0.2,
+                            "deltaZ": 0.3,
+                            "gyroDeltaX": 1.0,
+                            "gyroDeltaY": 2.0,
+                            "gyroDeltaZ": 3.0
+                        }
+                    ]
                 }
             ]
         }
     }
 
 
+class RawDataCompactRequest(BaseModel):
+    machine_id: int
+    secret_key: str
+    t0: int
+    dt: int
+    samples: List[List[int]]
+
+ 
 class RawDataResponse(BaseModel):
     message: str = "receive ok"
+    inserted: int = 0
